@@ -545,6 +545,22 @@
             display: block;
         }
 
+        /* Demo Notice */
+        .demo-notice {
+            background: rgba(245, 158, 11, 0.15);
+            border-radius: 16px;
+            padding: 16px;
+            margin-bottom: 24px;
+            text-align: center;
+            font-size: 14px;
+            border: 1px solid rgba(245, 158, 11, 0.3);
+        }
+
+        .demo-notice i {
+            color: var(--warning);
+            margin-right: 8px;
+        }
+
         /* Responsive */
         @media (max-width: 768px) {
             .container {
@@ -673,6 +689,12 @@
 
     <!-- Main Card -->
     <div class="main-card">
+        <!-- Demo Notice -->
+        <div class="demo-notice" id="demoNotice">
+            <i class="fas fa-info-circle"></i>
+            <span id="demoText">Backend connecting... Please wait</span>
+        </div>
+
         <!-- Platform Selector -->
         <div class="platform-selector">
             <button class="platform-btn youtube active" data-platform="youtube">
@@ -785,27 +807,47 @@
 
 <script>
     // ==================== BACKEND CONFIGURATION ====================
-    const ORIGINAL_BACKEND = 'https://stwsaver-backend.onrender.com';
+    // Multiple backend options for redundancy
+    const BACKEND_OPTIONS = [
+        { url: 'http://87.106.208.203:13959', name: 'Primary Server', working: false },
+        { url: 'https://stwsaver-backend.onrender.com', name: 'Render Backup', working: false },
+        { url: 'https://stwsaver-api.herokuapp.com', name: 'Heroku Backup', working: false }
+    ];
     
+    let currentBackend = BACKEND_OPTIONS[0];
+    let isBackendConnected = false;
+    
+    // CORS proxies for when direct connection fails
     const PROXIES = [
-        { name: 'corsproxy.io', format: (url) => `https://corsproxy.io/?${encodeURIComponent(url)}` },
-        { name: 'allorigins.win', format: (url) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}` },
-        { name: 'codetabs', format: (url) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}` }
+        { name: 'Direct', format: (url) => url, needsProxy: false },
+        { name: 'corsproxy.io', format: (url) => `https://corsproxy.io/?${encodeURIComponent(url)}`, needsProxy: true },
+        { name: 'allorigins.win', format: (url) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`, needsProxy: true },
+        { name: 'codetabs', format: (url) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`, needsProxy: true }
     ];
     
     let currentProxyIndex = 0;
+    let currentBackendIndex = 0;
     
     function getApiUrl(endpoint = '') {
-        return PROXIES[currentProxyIndex].format(ORIGINAL_BACKEND + endpoint);
+        let backendUrl = BACKEND_OPTIONS[currentBackendIndex].url + endpoint;
+        return PROXIES[currentProxyIndex].format(backendUrl);
     }
     
     function getDirectUrl(endpoint = '') {
-        return ORIGINAL_BACKEND + endpoint;
+        return BACKEND_OPTIONS[currentBackendIndex].url + endpoint;
     }
     
-    function rotateProxy() {
+    function nextProxy() {
         currentProxyIndex = (currentProxyIndex + 1) % PROXIES.length;
+        updateDemoNotice(`Switching to ${PROXIES[currentProxyIndex].name}...`);
         return currentProxyIndex;
+    }
+    
+    function nextBackend() {
+        currentBackendIndex = (currentBackendIndex + 1) % BACKEND_OPTIONS.length;
+        currentBackend = BACKEND_OPTIONS[currentBackendIndex];
+        updateDemoNotice(`Trying ${currentBackend.name}...`);
+        return currentBackendIndex;
     }
     // ==================== END CONFIGURATION ====================
 
@@ -827,6 +869,8 @@
     const serverStatus = document.getElementById('serverStatus');
     const errorMsg = document.getElementById('errorMessage');
     const errorText = document.getElementById('errorText');
+    const demoNotice = document.getElementById('demoNotice');
+    const demoText = document.getElementById('demoText');
 
     let currentPlatform = 'youtube';
     let currentFormat = 'mp4';
@@ -837,51 +881,90 @@
     // Initialize
     document.addEventListener('DOMContentLoaded', () => {
         updateServerStatus('Initializing...', 'warning');
+        updateDemoNotice('Connecting to servers...');
         checkBackendConnection();
         setupEventListeners();
         updateQualityOptions();
     });
 
+    function updateDemoNotice(message) {
+        demoText.textContent = message;
+        demoNotice.style.display = 'block';
+    }
+
+    function hideDemoNotice() {
+        demoNotice.style.display = 'none';
+    }
+
     function updateServerStatus(message, type = 'info') {
         const colors = { info: '#10b981', warning: '#f59e0b', error: '#ef4444', success: '#10b981' };
         serverStatus.innerHTML = `<i class="fas fa-circle" style="color: ${colors[type]}"></i> ${message}
-            <button onclick="switchProxy()" style="margin-left: 12px; background: none; border: none; color: var(--primary); cursor: pointer;">
-                <i class="fas fa-sync-alt"></i> Switch
+            <button onclick="manualRetry()" style="margin-left: 12px; background: none; border: none; color: var(--primary); cursor: pointer;">
+                <i class="fas fa-sync-alt"></i> Retry
             </button>`;
     }
 
-    window.switchProxy = function() {
-        rotateProxy();
-        updateServerStatus('Switching proxy...', 'warning');
+    window.manualRetry = function() {
+        currentProxyIndex = 0;
+        currentBackendIndex = 0;
+        updateServerStatus('Retrying connection...', 'warning');
         checkBackendConnection();
     };
 
     async function checkBackendConnection() {
-        try {
-            updateServerStatus('Testing connection...', 'warning');
-            const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 10000);
-            const response = await fetch(getApiUrl('/'), { method: 'GET', signal: controller.signal });
-            clearTimeout(timeoutId);
-            
-            if (response.ok) {
-                const data = await response.json();
-                updateServerStatus(`Connected`, 'success');
-                hideError();
-            } else {
-                throw new Error(`HTTP ${response.status}`);
+        let attempts = 0;
+        const maxAttempts = BACKEND_OPTIONS.length * PROXIES.length;
+        
+        while (attempts < maxAttempts && !isBackendConnected) {
+            try {
+                updateServerStatus(`Testing ${BACKEND_OPTIONS[currentBackendIndex].name} via ${PROXIES[currentProxyIndex].name}...`, 'warning');
+                
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => controller.abort(), 8000);
+                
+                const response = await fetch(getApiUrl('/'), {
+                    method: 'GET',
+                    headers: { 'Accept': 'application/json' },
+                    signal: controller.signal
+                });
+                
+                clearTimeout(timeoutId);
+                
+                if (response.ok) {
+                    isBackendConnected = true;
+                    BACKEND_OPTIONS[currentBackendIndex].working = true;
+                    updateServerStatus(`Connected to ${BACKEND_OPTIONS[currentBackendIndex].name}`, 'success');
+                    updateDemoNotice(`Connected! Ready to download`);
+                    setTimeout(() => hideDemoNotice(), 3000);
+                    console.log('✅ Connected via:', PROXIES[currentProxyIndex].name);
+                    return true;
+                } else {
+                    throw new Error(`HTTP ${response.status}`);
+                }
+            } catch (error) {
+                console.log(`❌ Failed: ${BACKEND_OPTIONS[currentBackendIndex].name} via ${PROXIES[currentProxyIndex].name}`);
+                attempts++;
+                
+                // Try next proxy
+                if (currentProxyIndex + 1 < PROXIES.length) {
+                    nextProxy();
+                } else {
+                    // Reset proxy and try next backend
+                    currentProxyIndex = 0;
+                    nextBackend();
+                }
             }
-        } catch (error) {
-            updateServerStatus(`Connection failed`, 'error');
-            showError(`Proxy failed. Trying another...`);
-            setTimeout(() => { rotateProxy(); checkBackendConnection(); }, 2000);
         }
+        
+        updateServerStatus('Connection Failed', 'error');
+        updateDemoNotice('⚠️ Cannot connect to any server. Please check your internet or try again later.');
+        return false;
     }
 
     function showError(message) {
         errorText.textContent = message;
         errorMsg.classList.add('show');
-        setTimeout(() => errorMsg.classList.remove('show'), 5000);
+        setTimeout(() => errorMsg.classList.remove('show'), 8000);
     }
 
     function hideError() {
@@ -940,6 +1023,11 @@
     }
 
     async function startDownloadProcess() {
+        if (!isBackendConnected) {
+            showError('Server not connected. Please wait for connection or click Retry.');
+            return;
+        }
+        
         const url = videoUrlInput.value.trim();
         if (!url) { showError('Please enter a video URL'); return; }
         if (currentPlatform === 'youtube' && !url.includes('youtube.com') && !url.includes('youtu.be')) {
@@ -958,7 +1046,10 @@
                 body: JSON.stringify({ url, format: currentFormat, quality: selectedQuality })
             });
             
-            if (!response.ok) throw new Error(`Server error: ${response.status}`);
+            if (!response.ok) {
+                const errorMsg = await response.text();
+                throw new Error(`Server error: ${response.status} - ${errorMsg}`);
+            }
             
             const data = await response.json();
             loading.classList.remove('show');
@@ -969,8 +1060,11 @@
             
             pollConversionProgress(data.file_id);
         } catch (error) {
-            showError(`Download failed: ${error.message}`);
+            console.error('Download error:', error);
+            showError(`Download failed: ${error.message}. Try switching proxy.`);
             resetUI();
+            isBackendConnected = false;
+            checkBackendConnection();
         }
     }
 
@@ -996,8 +1090,9 @@
                     resetUI();
                 }
             } catch (error) {
+                console.error('Progress error:', error);
                 clearInterval(pollingInterval);
-                showError('Progress check failed');
+                showError('Progress check failed. Try again.');
                 resetUI();
             }
         }, 2000);
@@ -1035,12 +1130,18 @@
     }
 
     window.handleDownload = function(url, filename) {
-        const link = document.createElement('a');
-        link.href = url;
-        link.download = filename;
-        document.body.appendChild(link);
-        link.click();
-        document.body.removeChild(link);
+        // For HTTP downloads from HTTPS page
+        if (window.location.protocol === 'https:' && url.startsWith('http:')) {
+            window.open(url, '_blank');
+            alert('Download opened in new tab. If blocked, please allow popups.');
+        } else {
+            const link = document.createElement('a');
+            link.href = url;
+            link.download = filename;
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+        }
         setTimeout(() => alert('Download started! File will auto-delete in 5 minutes.'), 500);
     };
 
